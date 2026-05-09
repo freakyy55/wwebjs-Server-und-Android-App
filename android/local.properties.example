@@ -1,0 +1,5 @@
+# Kopiere diese Datei zu local.properties oder ändere local.properties direkt.
+# Windows Beispiel:
+sdk.dir=C:/Users/Administrator/AppData/Local/Android/Sdk
+# Alternativ häufig:
+# sdk.dir=C:/Users/<DEIN_NAME>/AppData/Local/Android/Sdk
