@@ -1,11 +1,13 @@
 # Linux-Installation
 
-Diese Anleitung beschreibt die Installation des OwnMessenger Servers unter Linux.
+Diese Anleitung beschreibt die Installation des **OwnMessenger Servers** unter Linux.
 
 Empfohlen für:
 
+```text
 Ubuntu
 Debian
+```
 
 Andere Linux-Distributionen können funktionieren, müssen aber eventuell angepasst werden.
 
@@ -17,12 +19,16 @@ Damit der Server aus GitHub geladen werden kann, muss Git installiert sein.
 
 Auf Ubuntu/Debian ausführen:
 
-sudo apt update
-sudo apt install -y git
+```bash
+sudo apt-get update
+sudo apt-get install -y git
+```
 
 Danach prüfen:
 
+```bash
 git --version
+```
 
 Wenn eine Versionsnummer angezeigt wird, ist Git installiert.
 
@@ -32,27 +38,35 @@ Wenn eine Versionsnummer angezeigt wird, ist Git installiert.
 
 Der Linux-Server liegt im GitHub-Repository im Ordner:
 
+```text
 server_linux
+```
 
 Repository:
 
+```text
 https://github.com/freakyy55/wwebjs-Server-und-Android-App
+```
 
-Wenn du nicht das komplette Projekt laden möchtest, kannst du nur den Ordner server_linux herunterladen.
+Wenn du nicht das komplette Projekt laden möchtest, kannst du nur den Ordner `server_linux` herunterladen.
 
 ---
 
-## Variante 1: Nur server_linux mit Git laden
+## Variante 1: Nur `server_linux` mit Git laden
 
+```bash
 git clone --filter=blob:none --no-checkout https://github.com/freakyy55/wwebjs-Server-und-Android-App.git OwnMessenger-Linux-Server
 cd OwnMessenger-Linux-Server
 git sparse-checkout init --cone
 git sparse-checkout set server_linux
 git checkout main
+```
 
 Danach befindet sich der Linux-Server-Ordner hier:
 
+```bash
 cd server_linux
+```
 
 ---
 
@@ -60,8 +74,10 @@ cd server_linux
 
 Alternativ kannst du auch das komplette Repository klonen:
 
+```bash
 git clone https://github.com/freakyy55/wwebjs-Server-und-Android-App.git OwnMessenger-Linux-Server
 cd OwnMessenger-Linux-Server/server_linux
+```
 
 ---
 
@@ -69,24 +85,29 @@ cd OwnMessenger-Linux-Server/server_linux
 
 Im Linux-Server-Ordner ausführen:
 
+```bash
 cd server_linux
 chmod +x install.sh
 ./install.sh
+```
 
 Dann im Menü auswählen:
 
+```text
 1) Alles installieren/vorbereiten und Server dauerhaft starten
+```
 
-Das Script aktualisiert Paketlisten, installiert benötigte Pakete, erstellt die .env, erzeugt bei Bedarf einen App-Key, führt npm install aus, richtet den Autostart ein und startet danach den Server.
+Das Script aktualisiert Paketlisten, installiert benötigte Pakete, erstellt die `.env`, erzeugt bei Bedarf einen App-Key, führt `npm install` aus, richtet den Autostart ein und startet danach den Server.
 
 ---
 
-## Was install.sh macht
+## Was `install.sh` macht
 
-install.sh übernimmt unter Linux die wichtigsten Schritte automatisch.
+`install.sh` übernimmt unter Linux die wichtigsten Schritte automatisch.
 
 Je nach System werden installiert oder geprüft:
 
+```text
 Systemupdates
 Node.js
 npm
@@ -101,22 +122,27 @@ benötigte Ordner
 App-Key
 systemd-Service
 Autostart nach Server-Neustart
+```
 
 ---
 
 ## Server starten
 
+```bash
 cd server_linux
 chmod +x install.sh
 ./install.sh
+```
 
 Im Menü:
 
+```text
 1) Alles installieren/vorbereiten und Server dauerhaft starten
+```
 
 Beim ersten Start kann die Installation einige Minuten dauern.
 
-Nach der Einrichtung läuft der Server über systemd weiter, auch wenn die Konsole geschlossen wird.
+Nach der Einrichtung läuft der Server über `systemd` weiter, auch wenn die Konsole geschlossen wird.
 
 Der Server startet außerdem nach einem Server-Neustart automatisch wieder.
 
@@ -126,27 +152,39 @@ Der Server startet außerdem nach einem Server-Neustart automatisch wieder.
 
 Status anzeigen:
 
+```bash
 systemctl status ownmessenger
+```
 
 Live-Logs anzeigen:
 
+```bash
 journalctl -u ownmessenger -f
+```
 
 Server neu starten:
 
+```bash
 systemctl restart ownmessenger
+```
 
 Server stoppen:
 
+```bash
 systemctl stop ownmessenger
+```
 
 Server starten:
 
+```bash
 systemctl start ownmessenger
+```
 
 Autostart deaktivieren:
 
+```bash
 systemctl disable ownmessenger
+```
 
 ---
 
@@ -156,56 +194,70 @@ Die Android-App sollte mit einer HTTPS-Adresse verbunden werden.
 
 Beispiel:
 
+```text
 https://messenger.deine-domain.example
+```
 
 Ein lokaler HTTP-Link ist für Tests manchmal möglich, für normale Nutzung aber nicht empfohlen.
 
 Empfohlene Möglichkeiten für HTTPS:
 
+```text
 Cloudflare Tunnel
 Caddy Reverse Proxy
 Nginx Reverse Proxy
 Traefik
 eigene Domain mit Zertifikat
+```
 
 Beispiel:
 
+```text
 https://messenger.deine-domain.example -> http://127.0.0.1:3000
+```
 
 ---
 
 ## App-Key
 
-Der App-Key wird in der Datei .env gespeichert.
+Der App-Key wird in der Datei `.env` gespeichert.
 
 Beispiel:
 
+```env
 APP_TOKEN=dein-sicherer-key
+```
 
-Wenn APP_TOKEN leer ist, erzeugt install.sh automatisch einen sicheren Key.
+Wenn `APP_TOKEN` leer ist, erzeugt `install.sh` automatisch einen sicheren Key.
 
 Diesen Key musst du in der Android-App eintragen.
 
 App-Key anzeigen:
 
+```bash
 ./install.sh --key
+```
 
 Oder im Menü:
 
+```text
 7) App-Key anzeigen
+```
 
 ---
 
 ## Bis zu 5 WhatsApp-Nummern
 
-Über einen Server können bis zu 5 WhatsApp-Nummern / Accounts laufen.
+Über einen Server können bis zu **5 WhatsApp-Nummern / Accounts** laufen.
 
 Wichtig:
 
+```text
 jede Nummer braucht eine eigene WhatsApp-Web-Sitzung
 jede Nummer muss per QR-Code verbunden werden
 Sitzungsdaten sollten nicht gelöscht werden
 die Android-App verbindet sich mit dem Server, nicht direkt mit WhatsApp
+```
 
 ---
 
@@ -215,11 +267,13 @@ Beim ersten Start zeigt der Server einen QR-Code an.
 
 Diesen mit WhatsApp scannen:
 
+```text
 WhatsApp öffnen
 -> Einstellungen
 -> Verknüpfte Geräte
 -> Gerät verknüpfen
 -> QR-Code scannen
+```
 
 ---
 
@@ -229,12 +283,14 @@ Der Server kann Medien wie Bilder, Videos, Audiodateien und Dokumente verarbeite
 
 Je nach Konfiguration kann der Server:
 
+```text
 Metadaten von Bildern und Dateien anpassen oder entfernen
 Dateien für die Android-App vorbereiten
 Bilder neu encodieren
 Audio/Video mit ffmpeg neu encodieren
 Dateien mit ClamAV prüfen
 unsichere Dateien blockieren
+```
 
 Die Virenprüfung ist eine zusätzliche Schutzmaßnahme und ersetzt keine vollständige Sicherheitslösung.
 
@@ -244,15 +300,19 @@ Die Virenprüfung ist eine zusätzliche Schutzmaßnahme und ersetzt keine vollst
 
 In der Android-App eintragen:
 
+```text
 Server-URL: https://messenger.deine-domain.example
 App-Key:    derselbe Key aus APP_TOKEN
+```
 
 Danach in der App:
 
+```text
 Server speichern
 Neu verbinden
+```
 
-Wenn alles passt, sollte der Status auf live stehen.
+Wenn alles passt, sollte der Status auf `live` stehen.
 
 ---
 
@@ -262,16 +322,22 @@ Wenn alles passt, sollte der Status auf live stehen.
 
 Fehlerbeispiel:
 
+```text
 git: command not found
+```
 
 Lösung:
 
-sudo apt update
-sudo apt install -y git
+```bash
+sudo apt-get update
+sudo apt-get install -y git
+```
 
 Danach erneut versuchen:
 
+```bash
 git --version
+```
 
 ---
 
@@ -279,20 +345,28 @@ git --version
 
 Fehlerbeispiel:
 
+```text
 Could not resolve host: github.com
+```
 
 Dann DNS/Internet prüfen:
 
+```bash
 ping -c 3 1.1.1.1
 ping -c 3 github.com
+```
 
-Falls github.com nicht aufgelöst wird, DNS setzen:
+Falls `github.com` nicht aufgelöst wird, DNS setzen:
 
+```bash
 printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" | sudo tee /etc/resolv.conf
+```
 
 Danach erneut prüfen:
 
+```bash
 ping -c 3 github.com
+```
 
 ---
 
@@ -300,11 +374,13 @@ ping -c 3 github.com
 
 Prüfen:
 
+```bash
 node -v
+```
 
 Benötigt wird Node.js 18 oder neuer.
 
-install.sh versucht auf Ubuntu/Debian automatisch Node.js 20 LTS über NodeSource zu installieren, falls die vorhandene Version zu alt ist.
+`install.sh` versucht auf Ubuntu/Debian automatisch Node.js 20 LTS über NodeSource zu installieren, falls die vorhandene Version zu alt ist.
 
 ---
 
@@ -312,18 +388,24 @@ install.sh versucht auf Ubuntu/Debian automatisch Node.js 20 LTS über NodeSourc
 
 Fehlerbeispiel:
 
+```text
 npm: Kommando nicht gefunden
+```
 
 Lösung:
 
-sudo apt update
-sudo apt install -y npm
+```bash
+sudo apt-get update
+sudo apt-get install -y npm
+```
 
 Danach prüfen:
 
+```bash
 npm -v
+```
 
-Die neue install.sh versucht npm automatisch nachzuinstallieren, falls es fehlt.
+Die neue `install.sh` versucht `npm` automatisch nachzuinstallieren, falls es fehlt.
 
 ---
 
@@ -331,8 +413,10 @@ Die neue install.sh versucht npm automatisch nachzuinstallieren, falls es fehlt.
 
 Zusätzliche Pakete installieren:
 
-sudo apt update
-sudo apt install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 fonts-liberation
+```bash
+sudo apt-get update
+sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 fonts-liberation
+```
 
 ---
 
@@ -340,12 +424,16 @@ sudo apt install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 fonts-liberati
 
 Prüfen:
 
+```bash
 which clamscan
 clamscan --version
+```
 
 Virensignaturen aktualisieren:
 
+```bash
 sudo freshclam
+```
 
 ---
 
@@ -353,11 +441,13 @@ sudo freshclam
 
 Prüfen:
 
+```text
 Server läuft
 HTTPS-Adresse funktioniert
 App-Key stimmt
 Reverse Proxy leitet auf Port 3000 weiter
 Firewall lässt Verbindung zu
+```
 
 ---
 
@@ -365,6 +455,8 @@ Firewall lässt Verbindung zu
 
 Diese Linux-Anleitung bezieht sich nur auf den Ordner:
 
+```text
 server_linux
+```
 
-Unter Windows kann weiterhin das CONTROL_PANEL_WINDOWS genutzt werden.
+Unter Windows kann weiterhin das `CONTROL_PANEL_WINDOWS` genutzt werden.
