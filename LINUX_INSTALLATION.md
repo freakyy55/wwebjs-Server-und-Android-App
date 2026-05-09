@@ -13,6 +13,40 @@ Andere Linux-Distributionen können funktionieren, müssen aber eventuell angepa
 
 ---
 
+## Was diese Installation macht
+
+Die Linux-Installation richtet den Server so ein, dass er dauerhaft und sicher läuft.
+
+Wichtig:
+
+```text
+Node.js läuft nicht als root
+es wird ein eigener Systembenutzer ownmessenger erstellt
+der Server wird nach /opt/ownmessenger/server_linux kopiert
+der Server läuft über systemd
+der Server startet nach einem Server-Neustart automatisch wieder
+```
+
+Der systemd-Service heißt:
+
+```text
+ownmessenger
+```
+
+Der Linux-Benutzer heißt:
+
+```text
+ownmessenger
+```
+
+Der Installationsordner ist:
+
+```text
+/opt/ownmessenger/server_linux
+```
+
+---
+
 ## Voraussetzung: Git installieren
 
 Damit der Server aus GitHub geladen werden kann, muss Git installiert sein.
@@ -22,6 +56,13 @@ Auf Ubuntu/Debian ausführen:
 ```bash
 sudo apt-get update
 sudo apt-get install -y git
+```
+
+Wenn du bereits als `root` angemeldet bist, kannst du `sudo` weglassen:
+
+```bash
+apt-get update
+apt-get install -y git
 ```
 
 Danach prüfen:
@@ -86,7 +127,6 @@ cd OwnMessenger-Linux-Server/server_linux
 Im Linux-Server-Ordner ausführen:
 
 ```bash
-cd server_linux
 chmod +x install.sh
 ./install.sh
 ```
@@ -97,7 +137,7 @@ Dann im Menü auswählen:
 1) Alles installieren/vorbereiten und Server dauerhaft starten
 ```
 
-Das Script aktualisiert Paketlisten, installiert benötigte Pakete, erstellt die `.env`, erzeugt bei Bedarf einen App-Key, führt `npm install` aus, richtet den Autostart ein und startet danach den Server.
+Das Script aktualisiert Paketlisten, installiert benötigte Pakete, erstellt die `.env`, erzeugt bei Bedarf einen App-Key, führt `npm install` aus, erstellt einen eigenen Systembenutzer, richtet den systemd-Autostart ein und startet danach den Server.
 
 ---
 
@@ -115,21 +155,62 @@ Chromium oder Google Chrome
 ffmpeg
 ClamAV / clamscan
 Git
+rsync
 Build-Tools
 npm-Pakete
 Server-Konfiguration
 benötigte Ordner
 App-Key
-systemd-Service
+Systembenutzer ownmessenger
+Installationsordner /opt/ownmessenger/server_linux
+systemd-Service ownmessenger
 Autostart nach Server-Neustart
 ```
 
 ---
 
-## Server starten
+## Eigener Benutzer statt root
+
+Aus Sicherheitsgründen soll der Node.js-Server nicht als `root` laufen.
+
+Die neue `install.sh` erstellt deshalb automatisch:
+
+```text
+Benutzer: ownmessenger
+Gruppe:   ownmessenger
+Home:     /opt/ownmessenger
+```
+
+Der Server wird nach hier kopiert:
+
+```text
+/opt/ownmessenger/server_linux
+```
+
+Die Rechte werden passend gesetzt:
+
+```text
+ownmessenger:ownmessenger
+```
+
+Der systemd-Service startet Node.js dann mit:
+
+```ini
+User=ownmessenger
+Group=ownmessenger
+WorkingDirectory=/opt/ownmessenger/server_linux
+```
+
+Dadurch läuft der Server nicht als `root`.
+
+---
+
+## Server installieren und starten
+
+Im Git-Ordner ausführen:
 
 ```bash
-cd server_linux
+cd ~/OwnMessenger-Linux-Server/server_linux
 chmod +x install.sh
 ./install.sh
 ```
@@ -145,6 +226,34 @@ Beim ersten Start kann die Installation einige Minuten dauern.
 Nach der Einrichtung läuft der Server über `systemd` weiter, auch wenn die Konsole geschlossen wird.
 
 Der Server startet außerdem nach einem Server-Neustart automatisch wieder.
+
+---
+
+## Prüfen, ob Node.js nicht als root läuft
+
+Status anzeigen:
+
+```bash
+systemctl status ownmessenger
+```
+
+Prüfen, unter welchem Benutzer Node.js läuft:
+
+```bash
+ps -eo user,pid,cmd | grep node
+```
+
+Richtig ist zum Beispiel:
+
+```text
+ownmessenger   1234 node ...
+```
+
+Nicht richtig wäre:
+
+```text
+root           1234 node ...
+```
 
 ---
 
@@ -180,11 +289,36 @@ Server starten:
 systemctl start ownmessenger
 ```
 
+Autostart aktivieren:
+
+```bash
+systemctl enable ownmessenger
+```
+
 Autostart deaktivieren:
 
 ```bash
 systemctl disable ownmessenger
 ```
+
+---
+
+## Aus Git aktualisieren
+
+Wenn der Server später aktualisiert werden soll, im Git-Ordner ausführen:
+
+```bash
+cd ~/OwnMessenger-Linux-Server/server_linux
+./install.sh --git-update
+```
+
+Das Script lädt dann die neue Version aus Git, kopiert sie nach:
+
+```text
+/opt/ownmessenger/server_linux
+```
+
+Danach werden die npm-Abhängigkeiten aktualisiert und der systemd-Service neu gestartet.
 
 ---
 
@@ -221,6 +355,12 @@ https://messenger.deine-domain.example -> http://127.0.0.1:3000
 ## App-Key
 
 Der App-Key wird in der Datei `.env` gespeichert.
+
+Nach der Installation liegt die aktive `.env` hier:
+
+```text
+/opt/ownmessenger/server_linux/.env
+```
 
 Beispiel:
 
@@ -333,10 +473,39 @@ sudo apt-get update
 sudo apt-get install -y git
 ```
 
+Als `root`:
+
+```bash
+apt-get update
+apt-get install -y git
+```
+
 Danach erneut versuchen:
 
 ```bash
 git --version
+```
+
+---
+
+### Falscher Paketname bei Git
+
+Fehlerbeispiel:
+
+```text
+E: Paket gitt kann nicht gefunden werden.
+```
+
+Richtig ist:
+
+```bash
+apt-get install -y git
+```
+
+Nicht:
+
+```bash
+apt-get install -y gitt
 ```
 
 ---
@@ -360,6 +529,12 @@ Falls `github.com` nicht aufgelöst wird, DNS setzen:
 
 ```bash
 printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" | sudo tee /etc/resolv.conf
+```
+
+Als `root`:
+
+```bash
+printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
 ```
 
 Danach erneut prüfen:
@@ -399,6 +574,13 @@ sudo apt-get update
 sudo apt-get install -y npm
 ```
 
+Als `root`:
+
+```bash
+apt-get update
+apt-get install -y npm
+```
+
 Danach prüfen:
 
 ```bash
@@ -418,6 +600,13 @@ sudo apt-get update
 sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 fonts-liberation
 ```
 
+Als `root`:
+
+```bash
+apt-get update
+apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 fonts-liberation
+```
+
 ---
 
 ### ClamAV funktioniert nicht
@@ -433,6 +622,63 @@ Virensignaturen aktualisieren:
 
 ```bash
 sudo freshclam
+```
+
+Als `root`:
+
+```bash
+freshclam
+```
+
+---
+
+### Service startet nicht
+
+Status anzeigen:
+
+```bash
+systemctl status ownmessenger
+```
+
+Logs anzeigen:
+
+```bash
+journalctl -u ownmessenger -n 100 --no-pager
+```
+
+Live-Logs anzeigen:
+
+```bash
+journalctl -u ownmessenger -f
+```
+
+---
+
+### Node.js läuft doch als root
+
+Prüfen:
+
+```bash
+ps -eo user,pid,cmd | grep node
+```
+
+Wenn dort `root` steht, Service neu erstellen:
+
+```bash
+cd ~/OwnMessenger-Linux-Server/server_linux
+./install.sh
+```
+
+Danach im Menü auswählen:
+
+```text
+1) Alles installieren/vorbereiten und Server dauerhaft starten
+```
+
+Dann erneut prüfen:
+
+```bash
+ps -eo user,pid,cmd | grep node
 ```
 
 ---
