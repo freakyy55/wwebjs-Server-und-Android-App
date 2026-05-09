@@ -4,11 +4,27 @@ Diese Anleitung beschreibt die Installation des OwnMessenger Servers unter Linux
 
 Empfohlen für:
 
-
 Ubuntu
 Debian
 
 Andere Linux-Distributionen können funktionieren, müssen aber eventuell angepasst werden.
+
+---
+
+## Voraussetzung: Git installieren
+
+Damit der Server aus GitHub geladen werden kann, muss Git installiert sein.
+
+Auf Ubuntu/Debian ausführen:
+
+sudo apt update
+sudo apt install -y git
+
+Danach prüfen:
+
+git --version
+
+Wenn eine Versionsnummer angezeigt wird, ist Git installiert.
 
 ---
 
@@ -28,13 +44,13 @@ Wenn du nicht das komplette Projekt laden möchtest, kannst du nur den Ordner se
 
 ## Variante 1: Nur server_linux mit Git laden
 
-git clone --filter=blob:none --no-checkout https://github.com/freakyy55/wwebjs-Server-und-Android-App.git
-cd wwebjs-Server-und-Android-App
+git clone --filter=blob:none --no-checkout https://github.com/freakyy55/wwebjs-Server-und-Android-App.git OwnMessenger-Linux-Server
+cd OwnMessenger-Linux-Server
 git sparse-checkout init --cone
 git sparse-checkout set server_linux
 git checkout main
 
-Danach befindet sich nur der Linux-Server-Ordner im Projekt:
+Danach befindet sich der Linux-Server-Ordner hier:
 
 cd server_linux
 
@@ -44,8 +60,8 @@ cd server_linux
 
 Alternativ kannst du auch das komplette Repository klonen:
 
-git clone https://github.com/freakyy55/wwebjs-Server-und-Android-App.git
-cd wwebjs-Server-und-Android-App/server_linux
+git clone https://github.com/freakyy55/wwebjs-Server-und-Android-App.git OwnMessenger-Linux-Server
+cd OwnMessenger-Linux-Server/server_linux
 
 ---
 
@@ -59,9 +75,9 @@ chmod +x install.sh
 
 Dann im Menü auswählen:
 
-1) Alles installieren/vorbereiten und Server starten
+1) Alles installieren/vorbereiten und Server dauerhaft starten
 
-Das Script aktualisiert Paketlisten, installiert benötigte Pakete, erstellt die .env, erzeugt bei Bedarf einen App-Key, führt npm install aus und startet danach den Server.
+Das Script aktualisiert Paketlisten, installiert benötigte Pakete, erstellt die .env, erzeugt bei Bedarf einen App-Key, führt npm install aus, richtet den Autostart ein und startet danach den Server.
 
 ---
 
@@ -83,6 +99,8 @@ npm-Pakete
 Server-Konfiguration
 benötigte Ordner
 App-Key
+systemd-Service
+Autostart nach Server-Neustart
 
 ---
 
@@ -94,9 +112,41 @@ chmod +x install.sh
 
 Im Menü:
 
-1) Alles installieren/vorbereiten und Server starten
+1) Alles installieren/vorbereiten und Server dauerhaft starten
 
 Beim ersten Start kann die Installation einige Minuten dauern.
+
+Nach der Einrichtung läuft der Server über systemd weiter, auch wenn die Konsole geschlossen wird.
+
+Der Server startet außerdem nach einem Server-Neustart automatisch wieder.
+
+---
+
+## Server verwalten
+
+Status anzeigen:
+
+systemctl status ownmessenger
+
+Live-Logs anzeigen:
+
+journalctl -u ownmessenger -f
+
+Server neu starten:
+
+systemctl restart ownmessenger
+
+Server stoppen:
+
+systemctl stop ownmessenger
+
+Server starten:
+
+systemctl start ownmessenger
+
+Autostart deaktivieren:
+
+systemctl disable ownmessenger
 
 ---
 
@@ -135,6 +185,14 @@ APP_TOKEN=dein-sicherer-key
 Wenn APP_TOKEN leer ist, erzeugt install.sh automatisch einen sicheren Key.
 
 Diesen Key musst du in der Android-App eintragen.
+
+App-Key anzeigen:
+
+./install.sh --key
+
+Oder im Menü:
+
+7) App-Key anzeigen
 
 ---
 
@@ -200,6 +258,44 @@ Wenn alles passt, sollte der Status auf live stehen.
 
 ## Häufige Probleme
 
+### Git ist nicht installiert
+
+Fehlerbeispiel:
+
+git: command not found
+
+Lösung:
+
+sudo apt update
+sudo apt install -y git
+
+Danach erneut versuchen:
+
+git --version
+
+---
+
+### GitHub kann nicht erreicht werden
+
+Fehlerbeispiel:
+
+Could not resolve host: github.com
+
+Dann DNS/Internet prüfen:
+
+ping -c 3 1.1.1.1
+ping -c 3 github.com
+
+Falls github.com nicht aufgelöst wird, DNS setzen:
+
+printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" | sudo tee /etc/resolv.conf
+
+Danach erneut prüfen:
+
+ping -c 3 github.com
+
+---
+
 ### Node.js ist zu alt
 
 Prüfen:
@@ -208,7 +304,26 @@ node -v
 
 Benötigt wird Node.js 18 oder neuer.
 
-install.sh versucht auf Ubuntu/Debian/Pop!_OS automatisch Node.js 20 LTS über NodeSource zu installieren, falls die vorhandene Version zu alt ist.
+install.sh versucht auf Ubuntu/Debian automatisch Node.js 20 LTS über NodeSource zu installieren, falls die vorhandene Version zu alt ist.
+
+---
+
+### npm fehlt
+
+Fehlerbeispiel:
+
+npm: Kommando nicht gefunden
+
+Lösung:
+
+sudo apt update
+sudo apt install -y npm
+
+Danach prüfen:
+
+npm -v
+
+Die neue install.sh versucht npm automatisch nachzuinstallieren, falls es fehlt.
 
 ---
 
