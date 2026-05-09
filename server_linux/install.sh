@@ -1,405 +1,537 @@
 #!/usr/bin/env bash
-set -e
+set -Eeuo pipefail
 
-# OwnMessenger Linux Installer / Starter
-# Getestet/gedacht für Debian, Ubuntu und Pop!_OS.
-# Das Script aktualisiert Paketlisten, installiert benötigte Pakete,
-# erstellt bei Bedarf die .env, installiert npm-Abhängigkeiten und startet den Server.
+# OwnMessenger Linux Installer
+# Unterstützt: Debian, Ubuntu, Pop!_OS und ähnliche apt-basierte Systeme
 
 APP_NAME="OwnMessenger"
-SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SERVER_DIR"
+REQUIRED_NODE_MAJOR=18
+PREFERRED_NODE_MAJOR=20
+APT_UPDATED=0
 
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-RED="\033[0;31m"
-NC="\033[0m"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 log() {
-  echo -e "${GREEN}[OwnMessenger]${NC} $1"
+    echo "[${APP_NAME}] $*"
 }
 
 warn() {
-  echo -e "${YELLOW}[Hinweis]${NC} $1"
+    echo "[Hinweis] $*" >&2
 }
 
-err() {
-  echo -e "${RED}[Fehler]${NC} $1"
+fail() {
+    echo "[Fehler] $*" >&2
+    exit 1
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        if ! command -v sudo >/dev/null 2>&1; then
+            fail "Dieses Script benötigt Root-Rechte oder sudo."
+        fi
+        sudo "$@"
+    fi
 }
 
-ask_yes_no() {
-  local prompt="$1"
-  local default="${2:-y}"
-  local answer
-
-  if [ "$default" = "y" ]; then
-    read -r -p "$prompt [J/n]: " answer
-    answer="${answer:-j}"
-  else
-    read -r -p "$prompt [j/N]: " answer
-    answer="${answer:-n}"
-  fi
-
-  case "$answer" in
-    j|J|ja|JA|y|Y|yes|YES) return 0 ;;
-    *) return 1 ;;
-  esac
+apt_update_once() {
+    if [ "$APT_UPDATED" -eq 0 ]; then
+        log "Aktualisiere Paketlisten..."
+        run_root apt-get update
+        APT_UPDATED=1
+    fi
 }
 
-detect_package_manager() {
-  if need_cmd apt-get; then
-    echo "apt"
-  elif need_cmd dnf; then
-    echo "dnf"
-  elif need_cmd pacman; then
-    echo "pacman"
-  else
-    echo "unknown"
-  fi
+is_apt_system() {
+    command -v apt-get >/dev/null 2>&1
 }
 
-install_system_packages() {
-  local pm
-  pm="$(detect_package_manager)"
+apt_install() {
+    apt_update_once
+    DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "$@"
+}
 
-  log "Prüfe Systempakete..."
+apt_install_if_available() {
+    local available=()
 
-  case "$pm" in
-    apt)
-      log "APT-System erkannt. Paketlisten werden aktualisiert..."
-      sudo apt-get update
+    apt_update_once
 
-      if ask_yes_no "Systempakete aktualisieren? Das kann einige Minuten dauern." "y"; then
-        sudo apt-get upgrade -y
-      else
-        warn "System-Upgrade übersprungen."
-      fi
+    for pkg in "$@"; do
+        if apt-cache show "$pkg" >/dev/null 2>&1; then
+            available+=("$pkg")
+        else
+            warn "Paket nicht verfügbar und wird übersprungen: $pkg"
+        fi
+    done
 
-      log "Installiere benötigte Pakete für OwnMessenger..."
-      sudo apt-get install -y \
+    if [ "${#available[@]}" -gt 0 ]; then
+        DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "${available[@]}"
+    fi
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+node_major_version() {
+    if command_exists node; then
+        node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+browser_path() {
+    if command_exists chromium; then
+        command -v chromium
+    elif command_exists chromium-browser; then
+        command -v chromium-browser
+    elif command_exists google-chrome-stable; then
+        command -v google-chrome-stable
+    elif command_exists google-chrome; then
+        command -v google-chrome
+    else
+        true
+    fi
+}
+
+generate_token() {
+    if command_exists openssl; then
+        openssl rand -hex 32
+    elif command_exists node; then
+        node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    else
+        date +%s%N | sha256sum | awk '{print $1}'
+    fi
+}
+
+set_env_value() {
+    local key="$1"
+    local value="$2"
+    local file=".env"
+
+    local escaped_value
+    escaped_value="$(printf '%s' "$value" | sed 's/[\/&]/\\&/g')"
+
+    if grep -qE "^${key}=" "$file"; then
+        sed -i.bak "s/^${key}=.*/${key}=${escaped_value}/" "$file"
+        rm -f "${file}.bak"
+    else
+        printf '\n%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+get_env_value() {
+    local key="$1"
+    local file=".env"
+
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+
+    grep -E "^${key}=" "$file" | tail -n 1 | cut -d '=' -f 2- | sed 's/^["'\'']//;s/["'\'']$//'
+}
+
+require_linux() {
+    if [ "$(uname -s)" != "Linux" ]; then
+        fail "Dieses Script ist nur für Linux gedacht."
+    fi
+
+    if ! is_apt_system; then
+        fail "Dieses Script unterstützt aktuell apt-basierte Systeme wie Debian, Ubuntu und Pop!_OS."
+    fi
+}
+
+install_basic_packages() {
+    log "Installiere Basispakete..."
+
+    apt_install_if_available \
         ca-certificates \
         curl \
-        git \
+        wget \
         gnupg \
+        git \
         build-essential \
         python3 \
-        nodejs \
-        npm \
-        chromium-browser \
-        chromium \
-        ffmpeg \
-        clamav \
-        clamav-daemon \
+        make \
+        g++ \
+        openssl \
+        ffmpeg
+}
+
+install_browser_dependencies() {
+    log "Installiere Browser-Abhängigkeiten..."
+
+    apt_install_if_available \
         libnss3 \
         libatk-bridge2.0-0 \
+        libatk1.0-0 \
         libgtk-3-0 \
+        libgbm1 \
         libxss1 \
+        libxshmfence1 \
+        libasound2 \
         libasound2t64 \
         fonts-liberation \
-        xdg-utils || true
-
-      # Fallback für Distributionen ohne libasound2t64
-      sudo apt-get install -y libasound2 || true
-      ;;
-    dnf)
-      log "DNF-System erkannt."
-      sudo dnf check-update || true
-
-      if ask_yes_no "Systempakete aktualisieren? Das kann einige Minuten dauern." "y"; then
-        sudo dnf upgrade -y
-      else
-        warn "System-Upgrade übersprungen."
-      fi
-
-      sudo dnf install -y \
-        ca-certificates \
-        curl \
-        git \
-        gcc-c++ \
-        make \
-        python3 \
-        nodejs \
-        npm \
-        chromium \
-        ffmpeg \
-        clamav \
-        clamav-update \
-        nss \
-        atk \
-        gtk3 \
-        libXScrnSaver \
-        alsa-lib \
-        liberation-fonts \
-        xdg-utils || true
-      ;;
-    pacman)
-      log "Pacman-System erkannt."
-      sudo pacman -Sy
-
-      if ask_yes_no "Systempakete aktualisieren? Das kann einige Minuten dauern." "y"; then
-        sudo pacman -Syu --noconfirm
-      else
-        warn "System-Upgrade übersprungen."
-      fi
-
-      sudo pacman -S --needed --noconfirm \
-        ca-certificates \
-        curl \
-        git \
-        base-devel \
-        python \
-        nodejs \
-        npm \
-        chromium \
-        ffmpeg \
-        clamav \
-        nss \
-        atk \
-        gtk3 \
-        libxss \
-        alsa-lib \
-        ttf-liberation \
-        xdg-utils || true
-      ;;
-    *)
-      warn "Kein unterstützter Paketmanager erkannt."
-      warn "Bitte manuell installieren: Node.js 18+, npm, Chromium/Chrome, ffmpeg, clamscan, git."
-      ;;
-  esac
+        xdg-utils
 }
 
-install_newer_node_if_needed() {
-  if ! need_cmd node; then
-    warn "Node.js wurde nicht gefunden."
-  else
+install_chromium_if_missing() {
+    if browser_path >/dev/null 2>&1 && [ -n "$(browser_path)" ]; then
+        log "Browser gefunden: $(browser_path)"
+        return 0
+    fi
+
+    log "Chromium/Chrome wurde nicht gefunden. Versuche Chromium zu installieren..."
+
+    if apt-cache show chromium >/dev/null 2>&1; then
+        apt_install chromium
+    elif apt-cache show chromium-browser >/dev/null 2>&1; then
+        apt_install chromium-browser
+    else
+        warn "Kein Chromium-Paket gefunden. WhatsApp-Web/Puppeteer kann eventuell nicht starten."
+    fi
+
+    if browser_path >/dev/null 2>&1 && [ -n "$(browser_path)" ]; then
+        log "Browser nach Installation gefunden: $(browser_path)"
+    else
+        warn "Es wurde kein Chromium/Chrome-Binary gefunden."
+    fi
+}
+
+install_clamav_if_available() {
+    if command_exists clamscan; then
+        log "clamscan gefunden: $(command -v clamscan)"
+        return 0
+    fi
+
+    log "clamscan wurde nicht gefunden. Versuche ClamAV zu installieren..."
+
+    apt_install_if_available clamav clamav-daemon clamav-freshclam
+
+    if command_exists freshclam; then
+        log "Aktualisiere ClamAV-Signaturen, falls möglich..."
+        run_root freshclam || warn "freshclam konnte nicht erfolgreich ausgeführt werden. Das ist nicht kritisch."
+    fi
+
+    if command_exists clamscan; then
+        log "clamscan gefunden: $(command -v clamscan)"
+    else
+        warn "clamscan wurde nicht gefunden. Virenprüfung läuft dann nicht oder nur eingeschränkt."
+    fi
+}
+
+install_nodesource_node() {
+    log "Installiere Node.js ${PREFERRED_NODE_MAJOR}.x über NodeSource..."
+
+    apt_install_if_available ca-certificates curl gnupg
+
+    if curl -fsSL "https://deb.nodesource.com/setup_${PREFERRED_NODE_MAJOR}.x" | run_root bash -; then
+        apt_install nodejs
+    else
+        warn "NodeSource-Installation fehlgeschlagen. Versuche Node.js/npm über die Distribution zu installieren."
+        apt_install_if_available nodejs npm
+    fi
+}
+
+install_nodejs_and_npm() {
     local major
-    major="$(node -v | sed 's/^v//' | cut -d. -f1)"
-    if [ "$major" -ge 18 ]; then
-      log "Node.js ist OK: $(node -v)"
-      return 0
+    major="$(node_major_version)"
+
+    if [ "$major" -ge "$REQUIRED_NODE_MAJOR" ]; then
+        log "Node.js gefunden: $(node -v)"
+    else
+        if command_exists node; then
+            warn "Node.js ist zu alt: $(node -v). Benötigt wird Node.js ${REQUIRED_NODE_MAJOR} oder neuer."
+        else
+            log "Node.js wurde nicht gefunden."
+        fi
+
+        install_nodesource_node
     fi
-    warn "Node.js ist zu alt: $(node -v). Benötigt wird Node.js 18 oder neuer."
-  fi
 
-  if need_cmd apt-get; then
-    warn "Versuche Node.js 20 LTS über NodeSource zu installieren..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    sudo apt-get install -y nodejs
-  else
-    warn "Bitte Node.js 18 oder neuer manuell installieren."
-  fi
+    major="$(node_major_version)"
 
-  if need_cmd node; then
+    if [ "$major" -lt "$REQUIRED_NODE_MAJOR" ]; then
+        warn "NodeSource konnte keine passende Node.js-Version installieren. Versuche apt-Fallback..."
+        apt_install_if_available nodejs npm
+        major="$(node_major_version)"
+    fi
+
+    if [ "$major" -lt "$REQUIRED_NODE_MAJOR" ]; then
+        fail "Node.js ${REQUIRED_NODE_MAJOR} oder neuer konnte nicht installiert werden. Aktuell: $(command_exists node && node -v || echo 'nicht installiert')"
+    fi
+
     log "Node.js nach Installation: $(node -v)"
-  fi
-}
 
-prepare_clamav() {
-  if need_cmd clamscan; then
-    log "ClamAV gefunden: $(clamscan --version | head -n 1)"
-
-    if need_cmd freshclam; then
-      if ask_yes_no "ClamAV-Virensignaturen jetzt aktualisieren?" "y"; then
-        sudo systemctl stop clamav-freshclam 2>/dev/null || true
-        sudo freshclam || true
-        sudo systemctl start clamav-freshclam 2>/dev/null || true
-      fi
+    if ! command_exists npm; then
+        warn "npm wurde nicht gefunden. Installiere npm separat..."
+        apt_install_if_available npm
     fi
-  else
-    warn "clamscan wurde nicht gefunden. Virenprüfung läuft dann nicht oder nur eingeschränkt."
-  fi
+
+    if ! command_exists npm; then
+        warn "npm ist weiterhin nicht verfügbar. Versuche Corepack zu aktivieren..."
+        if command_exists corepack; then
+            run_root corepack enable || true
+        fi
+    fi
+
+    if ! command_exists npm; then
+        fail "npm konnte nicht installiert werden. Bitte manuell prüfen: apt install -y npm"
+    fi
+
+    log "npm gefunden: $(npm -v)"
 }
 
-create_env() {
-  log "Prüfe .env-Konfiguration..."
+prepare_env_file() {
+    log "Prüfe .env-Konfiguration..."
 
-  if [ ! -f ".env" ]; then
-    if [ -f ".env.linux.example" ]; then
-      cp ".env.linux.example" ".env"
-      log ".env wurde aus .env.linux.example erstellt."
-    elif [ -f ".env.example" ]; then
-      cp ".env.example" ".env"
-      log ".env wurde aus .env.example erstellt."
-    else
-      cat > ".env" <<'EOF'
+    if [ ! -f ".env" ]; then
+        if [ -f ".env.linux.example" ]; then
+            cp ".env.linux.example" ".env"
+            log ".env wurde aus .env.linux.example erstellt."
+        elif [ -f ".env.example" ]; then
+            cp ".env.example" ".env"
+            log ".env wurde aus .env.example erstellt."
+        else
+            cat > ".env" <<'EOF'
+NODE_ENV=production
 PORT=3000
-HOST=127.0.0.1
 APP_TOKEN=
-UPLOAD_DIR=./uploads
-DB_PATH=./data/own_messenger.sqlite
-PROVIDER=wwebjs
-MAX_WA_ACCOUNTS=5
-PUBLIC_BASE_URL=https://DEINE-DOMAIN
-REQUIRE_HTTPS=1
-TRUST_PROXY=1
-SECURE_MEDIA_CLAMAV=auto
-CLAMSCAN_PATH=/usr/bin/clamscan
-FFMPEG_PATH=/usr/bin/ffmpeg
 EOF
-      log ".env wurde neu erstellt."
+            log ".env wurde neu erstellt."
+        fi
+    else
+        log ".env ist bereits vorhanden."
     fi
-  fi
 
-  ensure_env_value "HOST" "127.0.0.1"
-  ensure_env_value "PORT" "3000"
-  ensure_env_value "MAX_WA_ACCOUNTS" "5"
-  ensure_env_value "FFMPEG_PATH" "/usr/bin/ffmpeg"
-  ensure_env_value "CLAMSCAN_PATH" "/usr/bin/clamscan"
-  ensure_env_value "SECURE_MEDIA_CLAMAV" "auto"
-  ensure_env_value "REQUIRE_HTTPS" "1"
-  ensure_env_value "TRUST_PROXY" "1"
+    if ! grep -qE "^APP_TOKEN=" ".env"; then
+        printf '\nAPP_TOKEN=\n' >> ".env"
+    fi
 
-  if ! grep -q '^PUBLIC_BASE_URL=' ".env"; then
-    echo "PUBLIC_BASE_URL=https://DEINE-DOMAIN" >> ".env"
-  fi
+    local current_token
+    current_token="$(get_env_value APP_TOKEN || true)"
 
-  if grep -q '^APP_TOKEN=$' ".env" || ! grep -q '^APP_TOKEN=' ".env"; then
+    if [ -z "$current_token" ]; then
+        local new_token
+        new_token="$(generate_token)"
+        set_env_value "APP_TOKEN" "$new_token"
+
+        echo
+        log "Neuer App-Key wurde erzeugt:"
+        echo "$new_token"
+        echo
+        warn "Diesen App-Key später in der Android-App eintragen."
+    else
+        log "APP_TOKEN ist bereits gesetzt."
+    fi
+
+    local chrome_path
+    chrome_path="$(browser_path || true)"
+
+    if [ -n "$chrome_path" ]; then
+        if ! grep -qE "^(CHROME_PATH|CHROME_EXECUTABLE_PATH|PUPPETEER_EXECUTABLE_PATH)=" ".env"; then
+            set_env_value "CHROME_EXECUTABLE_PATH" "$chrome_path"
+            log "CHROME_EXECUTABLE_PATH wurde in .env gesetzt: $chrome_path"
+        fi
+    fi
+}
+
+prepare_directories() {
+    log "Erstelle benötigte Ordner..."
+
+    mkdir -p \
+        logs \
+        data \
+        tmp \
+        uploads \
+        downloads \
+        media \
+        sessions \
+        .wwebjs_auth \
+        .wwebjs_cache
+}
+
+install_npm_dependencies() {
+    if [ ! -f "package.json" ]; then
+        fail "package.json wurde im aktuellen Ordner nicht gefunden: $SCRIPT_DIR"
+    fi
+
+    if ! command_exists npm; then
+        fail "npm fehlt. Installation kann nicht fortgesetzt werden."
+    fi
+
+    log "Installiere npm-Abhängigkeiten..."
+
+    npm config set fund false >/dev/null 2>&1 || true
+    npm config set audit false >/dev/null 2>&1 || true
+
+    npm install
+}
+
+show_status() {
+    echo
+    log "Status:"
+    echo "Ordner:      $SCRIPT_DIR"
+    echo "Node.js:     $(command_exists node && node -v || echo 'nicht gefunden')"
+    echo "npm:         $(command_exists npm && npm -v || echo 'nicht gefunden')"
+    echo "Browser:     $(browser_path || echo 'nicht gefunden')"
+    echo "clamscan:    $(command_exists clamscan && command -v clamscan || echo 'nicht gefunden')"
+
+    if [ -f ".env" ]; then
+        local token
+        token="$(get_env_value APP_TOKEN || true)"
+        if [ -n "$token" ]; then
+            echo "APP_TOKEN:   gesetzt"
+        else
+            echo "APP_TOKEN:   leer"
+        fi
+    else
+        echo ".env:        nicht vorhanden"
+    fi
+    echo
+}
+
+show_app_key() {
+    if [ ! -f ".env" ]; then
+        fail ".env wurde nicht gefunden."
+    fi
+
     local token
-    if need_cmd openssl; then
-      token="$(openssl rand -hex 32)"
+    token="$(get_env_value APP_TOKEN || true)"
+
+    if [ -z "$token" ]; then
+        warn "APP_TOKEN ist leer."
     else
-      token="$(date +%s%N | sha256sum | cut -d' ' -f1)"
+        echo
+        log "App-Key:"
+        echo "$token"
+        echo
     fi
-
-    if grep -q '^APP_TOKEN=' ".env"; then
-      sed -i "s#^APP_TOKEN=.*#APP_TOKEN=$token#" ".env"
-    else
-      echo "APP_TOKEN=$token" >> ".env"
-    fi
-
-    echo
-    log "Neuer App-Key wurde erzeugt:"
-    echo "$token"
-    echo
-    warn "Diesen App-Key später in der Android-App eintragen."
-  fi
-
-  mkdir -p data uploads
-}
-
-ensure_env_value() {
-  local key="$1"
-  local value="$2"
-
-  if grep -q "^${key}=" ".env"; then
-    if [ -z "$(grep "^${key}=" ".env" | head -n1 | cut -d= -f2-)" ]; then
-      sed -i "s#^${key}=.*#${key}=${value}#" ".env"
-    fi
-  else
-    echo "${key}=${value}" >> ".env"
-  fi
-}
-
-install_npm_packages() {
-  log "Installiere npm-Abhängigkeiten..."
-  npm install
-}
-
-show_connection_info() {
-  local token
-  local port
-  local public_url
-
-  token="$(grep '^APP_TOKEN=' .env | head -n1 | cut -d= -f2-)"
-  port="$(grep '^PORT=' .env | head -n1 | cut -d= -f2-)"
-  public_url="$(grep '^PUBLIC_BASE_URL=' .env | head -n1 | cut -d= -f2-)"
-
-  echo
-  echo "============================================================"
-  echo " OwnMessenger ist vorbereitet"
-  echo "============================================================"
-  echo
-  echo "Server-Port: ${port:-3000}"
-  echo "App-Key:     ${token:-nicht gesetzt}"
-  echo "URL für App: ${public_url:-https://DEINE-DOMAIN}"
-  echo
-  echo "Wichtig:"
-  echo "- In der Android-App sollte eine HTTPS-URL eingetragen werden."
-  echo "- Der App-Key muss in Server und App gleich sein."
-  echo "- Bis zu 5 WhatsApp-Nummern/Accounts pro Server sind vorgesehen."
-  echo "- Medien können verarbeitet, Metadaten bereinigt und per Virenscanner geprüft werden."
-  echo
-  echo "Beim ersten Start QR-Code mit WhatsApp scannen:"
-  echo "WhatsApp → Verknüpfte Geräte → Gerät verknüpfen"
-  echo
 }
 
 start_server() {
-  show_connection_info
-  log "Starte Server..."
-  npm start
+    if [ ! -f "package.json" ]; then
+        fail "package.json wurde nicht gefunden."
+    fi
+
+    if ! command_exists npm; then
+        fail "npm wurde nicht gefunden."
+    fi
+
+    show_status
+
+    log "Starte Server..."
+
+    if grep -qE '"start"[[:space:]]*:' package.json; then
+        npm start
+    elif [ -f "server.js" ]; then
+        node server.js
+    elif [ -f "index.js" ]; then
+        node index.js
+    elif [ -f "app.js" ]; then
+        node app.js
+    else
+        fail "Kein Start-Script gefunden. Bitte package.json prüfen."
+    fi
 }
 
-main_menu() {
-  while true; do
-    clear
+install_everything() {
+    require_linux
+    install_basic_packages
+    install_nodejs_and_npm
+    install_browser_dependencies
+    install_chromium_if_missing
+    install_clamav_if_available
+    prepare_env_file
+    prepare_directories
+    install_npm_dependencies
+    show_status
+}
+
+print_menu() {
+    clear || true
     echo "=========================================="
-    echo " OwnMessenger Linux install.sh"
+    echo " OwnMessenger Linux Installer"
     echo "=========================================="
     echo
     echo "1) Alles installieren/vorbereiten und Server starten"
     echo "2) Nur installieren/vorbereiten"
     echo "3) Server starten"
     echo "4) App-Key anzeigen"
-    echo "5) Beenden"
+    echo "5) Status anzeigen"
+    echo "0) Beenden"
     echo
-    read -r -p "Auswahl: " choice
-
-    case "$choice" in
-      1)
-        install_system_packages
-        install_newer_node_if_needed
-        prepare_clamav
-        create_env
-        install_npm_packages
-        start_server
-        ;;
-      2)
-        install_system_packages
-        install_newer_node_if_needed
-        prepare_clamav
-        create_env
-        install_npm_packages
-        log "Installation/Vorbereitung abgeschlossen."
-        read -r -p "Weiter mit Enter..."
-        ;;
-      3)
-        create_env
-        if [ ! -d "node_modules" ]; then
-          install_npm_packages
-        fi
-        start_server
-        ;;
-      4)
-        create_env
-        echo
-        echo "App-Key:"
-        grep '^APP_TOKEN=' .env | cut -d= -f2-
-        echo
-        read -r -p "Weiter mit Enter..."
-        ;;
-      5)
-        exit 0
-        ;;
-      *)
-        warn "Ungültige Auswahl."
-        read -r -p "Weiter mit Enter..."
-        ;;
-    esac
-  done
 }
 
-if [ "${1:-}" = "--start" ]; then
-  install_system_packages
-  install_newer_node_if_needed
-  prepare_clamav
-  create_env
-  install_npm_packages
-  start_server
-else
-  main_menu
-fi
+main_menu() {
+    while true; do
+        print_menu
+        read -r -p "Auswahl: " choice
+
+        case "$choice" in
+            1)
+                install_everything
+                start_server
+                ;;
+            2)
+                install_everything
+                read -r -p "Fertig. Enter drücken..."
+                ;;
+            3)
+                start_server
+                ;;
+            4)
+                show_app_key
+                read -r -p "Enter drücken..."
+                ;;
+            5)
+                show_status
+                read -r -p "Enter drücken..."
+                ;;
+            0)
+                exit 0
+                ;;
+            *)
+                warn "Ungültige Auswahl."
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    --install)
+        install_everything
+        ;;
+    --start)
+        start_server
+        ;;
+    --install-start)
+        install_everything
+        start_server
+        ;;
+    --key)
+        show_app_key
+        ;;
+    --status)
+        show_status
+        ;;
+    --help|-h)
+        echo "Nutzung:"
+        echo "  ./install.sh                 Menü öffnen"
+        echo "  ./install.sh --install       Nur installieren/vorbereiten"
+        echo "  ./install.sh --start         Server starten"
+        echo "  ./install.sh --install-start Installieren und starten"
+        echo "  ./install.sh --key           App-Key anzeigen"
+        echo "  ./install.sh --status        Status anzeigen"
+        ;;
+    "")
+        main_menu
+        ;;
+    *)
+        fail "Unbekannter Parameter: $1"
+        ;;
+esac
