@@ -2,14 +2,29 @@
 set -Eeuo pipefail
 
 # OwnMessenger Linux Installer
+#
+# Funktionen:
 # - installiert Node.js/npm und benötigte Pakete
-# - kopiert den Server nach /opt/ownmessenger/server_linux
-# - erstellt einen eigenen Systembenutzer "ownmessenger"
-# - erstellt einen systemd-Service
-# - startet Node.js NICHT als root, sondern als Benutzer "ownmessenger"
-# - aktiviert Autostart nach Server-Neustart
+# - erstellt eigenen Systembenutzer "ownmessenger"
+# - kopiert Server nach /opt/ownmessenger/server_linux
+# - führt npm install als Benutzer ownmessenger aus
+# - startet Node.js NICHT als root
+# - erstellt systemd-Service mit Autostart nach Reboot
+# - fragt optional nach einer Domain
+# - prüft, ob die Domain auf die Server-IP zeigt
+# - installiert/konfiguriert Caddy als HTTPS-Reverse-Proxy
+#
+# Nutzung:
+#   ./install.sh
+#   ./install.sh --install-start
+#   ./install.sh --install-start --domain bg-island.de
+#   ./install.sh --domain bg-island.de
+#   ./install.sh --git-update
+#   ./install.sh --logs
+#   ./install.sh --status
 
 APP_NAME="OwnMessenger"
+
 SERVICE_NAME="ownmessenger"
 APP_USER="ownmessenger"
 APP_GROUP="ownmessenger"
@@ -17,12 +32,19 @@ APP_HOME="/opt/ownmessenger"
 INSTALL_DIR="${APP_HOME}/server_linux"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
+CADDY_SERVICE="caddy"
+CADDYFILE="/etc/caddy/Caddyfile"
+
 REQUIRED_NODE_MAJOR=18
 PREFERRED_NODE_MAJOR=20
 APT_UPDATED=0
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$SOURCE_DIR"
+
+DOMAIN=""
+ASSUME_YES=0
+SKIP_DOMAIN=0
 
 log() {
     echo "[${APP_NAME}] $*"
@@ -148,6 +170,33 @@ set_env_value() {
     else
         printf '\n%s=%s\n' "$key" "$value" >> "$file"
     fi
+}
+
+confirm_yes_no() {
+    local prompt="$1"
+    local default="${2:-n}"
+    local answer=""
+
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        return 0
+    fi
+
+    if [ "$default" = "y" ]; then
+        read -r -p "${prompt} [J/n]: " answer
+        answer="${answer:-j}"
+    else
+        read -r -p "${prompt} [j/N]: " answer
+        answer="${answer:-n}"
+    fi
+
+    case "$answer" in
+        j|J|ja|JA|y|Y|yes|YES)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 require_linux() {
@@ -352,6 +401,7 @@ sync_to_install_dir() {
             --exclude "uploads" \
             --exclude "downloads" \
             --exclude "media" \
+            --exclude "data" \
             "${SOURCE_DIR}/" "${INSTALL_DIR}/"
     else
         warn "rsync wurde nicht gefunden. Verwende cp-Fallback."
@@ -379,12 +429,25 @@ prepare_env_file() {
             cat > ".env" <<'EOF'
 NODE_ENV=production
 PORT=3000
+HOST=127.0.0.1
 APP_TOKEN=
 EOF
             log ".env wurde neu erstellt."
         fi
     else
         log ".env ist bereits vorhanden."
+    fi
+
+    if ! grep -qE "^PORT=" ".env"; then
+        printf '\nPORT=3000\n' >> ".env"
+    fi
+
+    # Für HTTPS über Caddy soll Node.js nur lokal erreichbar sein.
+    if grep -qE "^HOST=" ".env"; then
+        sed -i.bak "s/^HOST=.*/HOST=127.0.0.1/" ".env"
+        rm -f ".env.bak"
+    else
+        printf '\nHOST=127.0.0.1\n' >> ".env"
     fi
 
     if ! grep -qE "^APP_TOKEN=" ".env"; then
@@ -417,6 +480,11 @@ EOF
             set_env_value "PUPPETEER_EXECUTABLE_PATH" "$chrome"
             log "Browser-Pfad wurde in .env gesetzt: $chrome"
         fi
+    fi
+
+    if [ -n "$DOMAIN" ]; then
+        set_env_value "PUBLIC_DOMAIN" "$DOMAIN"
+        set_env_value "PUBLIC_URL" "https://${DOMAIN}"
     fi
 
     run_root chown "${APP_USER}:${APP_GROUP}" ".env"
@@ -615,34 +683,337 @@ show_service_status() {
     fi
 }
 
-show_status() {
-    echo
-    log "Status:"
-    echo "Quellordner:        $SOURCE_DIR"
-    echo "Installationsordner:$APP_DIR"
-    echo "Service-Benutzer:   $APP_USER"
-    echo "Node.js:            $(command_exists node && node -v || echo 'nicht gefunden')"
-    echo "npm:                $(command_exists npm && npm -v || echo 'nicht gefunden')"
-    echo "Browser:            $(browser_path || echo 'nicht gefunden')"
-    echo "clamscan:           $(command_exists clamscan && command -v clamscan || echo 'nicht gefunden')"
+sanitize_domain() {
+    local input="$1"
 
-    if [ -f "${APP_DIR}/.env" ]; then
-        local token
-        token="$(get_env_value APP_TOKEN || true)"
-        if [ -n "$token" ]; then
-            echo "APP_TOKEN:          gesetzt"
-        else
-            echo "APP_TOKEN:          leer"
+    input="${input#http://}"
+    input="${input#https://}"
+    input="${input%%/*}"
+    input="${input%%:*}"
+    input="$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+
+    printf '%s' "$input"
+}
+
+valid_domain() {
+    local d="$1"
+
+    if [ -z "$d" ]; then
+        return 1
+    fi
+
+    if [[ "$d" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+ask_for_domain_if_needed() {
+    if [ "$SKIP_DOMAIN" -eq 1 ]; then
+        DOMAIN=""
+        return 0
+    fi
+
+    if [ -n "$DOMAIN" ]; then
+        DOMAIN="$(sanitize_domain "$DOMAIN")"
+        if ! valid_domain "$DOMAIN"; then
+            fail "Ungültige Domain: $DOMAIN"
         fi
+        return 0
+    fi
+
+    echo
+    echo "HTTPS-Domain einrichten"
+    echo "Beispiel: bg-island.de oder test2.my-nav.eu"
+    echo "Leer lassen, wenn du HTTPS/Caddy jetzt überspringen willst."
+    echo
+
+    local input=""
+    read -r -p "Domain: " input
+
+    input="$(sanitize_domain "$input")"
+
+    if [ -z "$input" ]; then
+        warn "Keine Domain angegeben. HTTPS/Caddy wird übersprungen."
+        SKIP_DOMAIN=1
+        DOMAIN=""
+        return 0
+    fi
+
+    if ! valid_domain "$input"; then
+        fail "Ungültige Domain: $input"
+    fi
+
+    DOMAIN="$input"
+}
+
+get_public_ipv4() {
+    local ip=""
+
+    if command_exists curl; then
+        for url in \
+            "https://api.ipify.org" \
+            "https://ipv4.icanhazip.com" \
+            "https://ifconfig.me/ip"
+        do
+            ip="$(curl -4fsS --max-time 8 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+            if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+                echo "$ip"
+                return 0
+            fi
+        done
+    fi
+
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        echo "$ip"
+        return 0
+    fi
+
+    return 1
+}
+
+resolve_domain_ipv4() {
+    local domain="$1"
+
+    if command_exists getent; then
+        getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u
+        return 0
+    fi
+
+    return 1
+}
+
+check_domain_points_to_server() {
+    local domain="$1"
+    local public_ip=""
+    local resolved_ips=""
+
+    log "Prüfe DNS für Domain: $domain"
+
+    public_ip="$(get_public_ipv4 || true)"
+    resolved_ips="$(resolve_domain_ipv4 "$domain" || true)"
+
+    echo
+    echo "Server-IP laut Internet:"
+    echo "${public_ip:-nicht ermittelbar}"
+    echo
+    echo "DNS-A-Record für ${domain}:"
+    if [ -n "$resolved_ips" ]; then
+        echo "$resolved_ips"
     else
-        echo ".env:               nicht vorhanden"
+        echo "keine IPv4-Adresse gefunden"
+    fi
+    echo
+
+    if [ -z "$public_ip" ]; then
+        warn "Die öffentliche Server-IP konnte nicht sicher ermittelt werden."
+        if confirm_yes_no "Trotzdem mit dieser Domain fortfahren?" "n"; then
+            return 0
+        fi
+        fail "Domain-Einrichtung abgebrochen."
+    fi
+
+    if [ -z "$resolved_ips" ]; then
+        warn "Die Domain zeigt aktuell auf keine IPv4-Adresse."
+        warn "Lege beim DNS-Anbieter einen A-Record an:"
+        echo
+        echo "Name:  @ oder Subdomain"
+        echo "Typ:   A"
+        echo "Wert:  $public_ip"
+        echo "TTL:   3600"
+        echo
+        if confirm_yes_no "Trotzdem Caddy schon vorbereiten?" "n"; then
+            return 0
+        fi
+        fail "Domain zeigt noch nicht auf diesen Server."
+    fi
+
+    if echo "$resolved_ips" | grep -qx "$public_ip"; then
+        log "DNS passt: ${domain} zeigt auf ${public_ip}."
+        return 0
+    fi
+
+    warn "DNS passt noch nicht."
+    warn "Die Domain zeigt nicht auf die erkannte Server-IP."
+
+    echo
+    echo "Erwartet:"
+    echo "$public_ip"
+    echo
+    echo "Aktuell gefunden:"
+    echo "$resolved_ips"
+    echo
+
+    if confirm_yes_no "Trotzdem Caddy schon vorbereiten?" "n"; then
+        return 0
+    fi
+
+    fail "Domain-Einrichtung abgebrochen. Bitte DNS-A-Record korrigieren."
+}
+
+install_caddy() {
+    if command_exists caddy; then
+        log "Caddy gefunden: $(caddy version 2>/dev/null || command -v caddy)"
+        return 0
+    fi
+
+    log "Installiere Caddy für HTTPS-Reverse-Proxy..."
+    apt_install_if_available caddy
+
+    if ! command_exists caddy; then
+        fail "Caddy konnte nicht installiert werden. Bitte Caddy manuell installieren oder Domain-Setup überspringen."
+    fi
+
+    log "Caddy installiert: $(caddy version 2>/dev/null || command -v caddy)"
+}
+
+configure_caddy() {
+    local domain="$1"
+
+    if [ -z "$domain" ]; then
+        warn "Keine Domain angegeben. Caddy-Konfiguration wird übersprungen."
+        return 0
+    fi
+
+    install_caddy
+
+    run_root mkdir -p /etc/caddy
+
+    if [ -f "$CADDYFILE" ]; then
+        local backup="${CADDYFILE}.bak.$(date +%Y%m%d-%H%M%S)"
+        run_root cp "$CADDYFILE" "$backup"
+        log "Backup der alten Caddyfile erstellt: $backup"
+    fi
+
+    log "Schreibe Caddy-Konfiguration für ${domain}..."
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    cat > "$tmp_file" <<EOF
+${domain} {
+    encode gzip
+    reverse_proxy 127.0.0.1:3000
+}
+EOF
+
+    run_root mv "$tmp_file" "$CADDYFILE"
+    run_root chmod 644 "$CADDYFILE"
+
+    if command_exists caddy; then
+        run_root caddy validate --config "$CADDYFILE" || fail "Caddyfile ist ungültig."
     fi
 
     if command_exists systemctl; then
-        echo "Service aktiviert:  $(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || echo 'nicht eingerichtet')"
-        echo "Service läuft:      $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo 'nicht aktiv')"
+        run_root systemctl enable "$CADDY_SERVICE"
+        run_root systemctl restart "$CADDY_SERVICE"
+
+        sleep 2
+
+        if run_root systemctl is-active --quiet "$CADDY_SERVICE"; then
+            log "Caddy läuft."
+        else
+            warn "Caddy ist nicht aktiv. Status:"
+            run_root systemctl status "$CADDY_SERVICE" --no-pager || true
+            fail "Caddy konnte nicht gestartet werden."
+        fi
     else
-        echo "Service:            systemctl nicht gefunden"
+        warn "systemctl wurde nicht gefunden. Caddy wurde nicht als Service gestartet."
+    fi
+
+    log "HTTPS sollte erreichbar sein unter: https://${domain}"
+}
+
+configure_firewall_for_https() {
+    if command_exists ufw; then
+        local status
+        status="$(ufw status 2>/dev/null | head -n 1 || true)"
+
+        if echo "$status" | grep -qi "active\|aktiv"; then
+            log "UFW ist aktiv. Öffne Port 80 und 443..."
+            run_root ufw allow 80/tcp || true
+            run_root ufw allow 443/tcp || true
+            run_root ufw reload || true
+        else
+            log "UFW ist nicht aktiv oder nicht konfiguriert."
+        fi
+    fi
+}
+
+setup_domain_and_https() {
+    ask_for_domain_if_needed
+
+    if [ -z "$DOMAIN" ]; then
+        return 0
+    fi
+
+    check_domain_points_to_server "$DOMAIN"
+
+    APP_DIR="$INSTALL_DIR"
+    cd "$APP_DIR"
+
+    if [ -f ".env" ]; then
+        set_env_value "HOST" "127.0.0.1"
+        set_env_value "PUBLIC_DOMAIN" "$DOMAIN"
+        set_env_value "PUBLIC_URL" "https://${DOMAIN}"
+        run_root chown "${APP_USER}:${APP_GROUP}" ".env"
+        run_root chmod 600 ".env"
+    fi
+
+    restart_service
+    configure_firewall_for_https
+    configure_caddy "$DOMAIN"
+
+    echo
+    log "Domain-Setup abgeschlossen."
+    echo "URL: https://${DOMAIN}"
+    echo
+}
+
+show_status() {
+    echo
+    log "Status:"
+    echo "Quellordner:         $SOURCE_DIR"
+    echo "Installationsordner: $APP_DIR"
+    echo "Service-Benutzer:    $APP_USER"
+    echo "Node.js:             $(command_exists node && node -v || echo 'nicht gefunden')"
+    echo "npm:                 $(command_exists npm && npm -v || echo 'nicht gefunden')"
+    echo "Browser:             $(browser_path || echo 'nicht gefunden')"
+    echo "clamscan:            $(command_exists clamscan && command -v clamscan || echo 'nicht gefunden')"
+    echo "Caddy:               $(command_exists caddy && (caddy version 2>/dev/null || command -v caddy) || echo 'nicht gefunden')"
+
+    if [ -f "${APP_DIR}/.env" ]; then
+        local token
+        local host
+        local port
+        local public_url
+        token="$(get_env_value APP_TOKEN || true)"
+        host="$(get_env_value HOST || true)"
+        port="$(get_env_value PORT || true)"
+        public_url="$(get_env_value PUBLIC_URL || true)"
+
+        if [ -n "$token" ]; then
+            echo "APP_TOKEN:           gesetzt"
+        else
+            echo "APP_TOKEN:           leer"
+        fi
+
+        echo "HOST:                ${host:-nicht gesetzt}"
+        echo "PORT:                ${port:-nicht gesetzt}"
+        echo "PUBLIC_URL:          ${public_url:-nicht gesetzt}"
+    else
+        echo ".env:                nicht vorhanden"
+    fi
+
+    if command_exists systemctl; then
+        echo "Service aktiviert:   $(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || echo 'nicht eingerichtet')"
+        echo "Service läuft:       $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo 'nicht aktiv')"
+        echo "Caddy aktiviert:     $(systemctl is-enabled "$CADDY_SERVICE" 2>/dev/null || echo 'nicht eingerichtet')"
+        echo "Caddy läuft:         $(systemctl is-active "$CADDY_SERVICE" 2>/dev/null || echo 'nicht aktiv')"
+    else
+        echo "Service:             systemctl nicht gefunden"
     fi
 
     echo
@@ -690,6 +1061,8 @@ git_update() {
     log "Git-Update abgeschlossen."
 
     sync_to_install_dir
+    prepare_env_file
+    prepare_directories
     install_npm_dependencies
     restart_service
 }
@@ -713,6 +1086,7 @@ install_everything() {
 install_and_start() {
     install_everything
     start_service
+    setup_domain_and_https
 }
 
 print_menu() {
@@ -721,16 +1095,17 @@ print_menu() {
     echo " OwnMessenger Linux Installer"
     echo "=========================================="
     echo
-    echo "1) Alles installieren/vorbereiten und Server dauerhaft starten"
+    echo "1) Alles installieren/vorbereiten, Domain abfragen und Server dauerhaft starten"
     echo "2) Nur installieren/vorbereiten und Autostart-Service einrichten"
-    echo "3) Server starten"
-    echo "4) Server neu starten"
-    echo "5) Server stoppen"
-    echo "6) Server-Logs anzeigen"
-    echo "7) App-Key anzeigen"
-    echo "8) Status anzeigen"
-    echo "9) Aus Git aktualisieren und Server neu starten"
-    echo "10) Autostart deaktivieren"
+    echo "3) Domain/HTTPS mit Caddy einrichten"
+    echo "4) Server starten"
+    echo "5) Server neu starten"
+    echo "6) Server stoppen"
+    echo "7) Server-Logs anzeigen"
+    echo "8) App-Key anzeigen"
+    echo "9) Status anzeigen"
+    echo "10) Aus Git aktualisieren und Server neu starten"
+    echo "11) Autostart deaktivieren"
     echo "0) Beenden"
     echo
 }
@@ -752,38 +1127,44 @@ main_menu() {
             3)
                 APP_DIR="$INSTALL_DIR"
                 cd "$APP_DIR"
-                start_service
+                setup_domain_and_https
                 read -r -p "Fertig. Enter drücken..."
                 ;;
             4)
                 APP_DIR="$INSTALL_DIR"
                 cd "$APP_DIR"
-                restart_service
+                start_service
                 read -r -p "Fertig. Enter drücken..."
                 ;;
             5)
-                stop_service
+                APP_DIR="$INSTALL_DIR"
+                cd "$APP_DIR"
+                restart_service
                 read -r -p "Fertig. Enter drücken..."
                 ;;
             6)
-                show_logs
+                stop_service
+                read -r -p "Fertig. Enter drücken..."
                 ;;
             7)
+                show_logs
+                ;;
+            8)
                 APP_DIR="$INSTALL_DIR"
                 show_app_key
                 read -r -p "Enter drücken..."
                 ;;
-            8)
+            9)
                 APP_DIR="$INSTALL_DIR"
                 show_status
                 show_service_status
                 read -r -p "Enter drücken..."
                 ;;
-            9)
+            10)
                 git_update
                 read -r -p "Fertig. Enter drücken..."
                 ;;
-            10)
+            11)
                 disable_service
                 read -r -p "Fertig. Enter drücken..."
                 ;;
@@ -798,7 +1179,40 @@ main_menu() {
     done
 }
 
-case "${1:-}" in
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --domain)
+                shift
+                [ "$#" -gt 0 ] || fail "--domain benötigt einen Wert."
+                DOMAIN="$1"
+                ;;
+            --yes|-y)
+                ASSUME_YES=1
+                ;;
+            --skip-domain)
+                SKIP_DOMAIN=1
+                ;;
+            --install|--start|--install-start|--restart|--stop|--logs|--key|--status|--git-update|--disable-autostart|--https|--help|-h)
+                ACTION="$1"
+                ;;
+            *)
+                if [ -z "${ACTION:-}" ]; then
+                    ACTION="$1"
+                else
+                    fail "Unbekannter Parameter: $1"
+                fi
+                ;;
+        esac
+        shift
+    done
+}
+
+ACTION=""
+
+parse_args "$@"
+
+case "${ACTION:-}" in
     --install)
         install_everything
         ;;
@@ -833,27 +1247,39 @@ case "${1:-}" in
     --git-update)
         git_update
         ;;
+    --https)
+        APP_DIR="$INSTALL_DIR"
+        cd "$APP_DIR"
+        setup_domain_and_https
+        ;;
     --disable-autostart)
         disable_service
         ;;
     --help|-h)
         echo "Nutzung:"
-        echo "  ./install.sh                     Menü öffnen"
-        echo "  ./install.sh --install           Installieren und systemd-Autostart einrichten"
-        echo "  ./install.sh --install-start     Installieren, Autostart einrichten und starten"
-        echo "  ./install.sh --start             Server starten"
-        echo "  ./install.sh --restart           Server neu starten"
-        echo "  ./install.sh --stop              Server stoppen"
-        echo "  ./install.sh --logs              Live-Logs anzeigen"
-        echo "  ./install.sh --key               App-Key anzeigen"
-        echo "  ./install.sh --status            Status anzeigen"
-        echo "  ./install.sh --git-update        Aus Git aktualisieren und Server neu starten"
-        echo "  ./install.sh --disable-autostart Autostart deaktivieren"
+        echo "  ./install.sh                                      Menü öffnen"
+        echo "  ./install.sh --install                            Installieren und systemd-Autostart einrichten"
+        echo "  ./install.sh --install-start                      Installieren, Domain abfragen und starten"
+        echo "  ./install.sh --install-start --domain bg-island.de"
+        echo "  ./install.sh --https --domain bg-island.de        Nur HTTPS/Caddy einrichten"
+        echo "  ./install.sh --start                              Server starten"
+        echo "  ./install.sh --restart                            Server neu starten"
+        echo "  ./install.sh --stop                               Server stoppen"
+        echo "  ./install.sh --logs                               Live-Logs anzeigen"
+        echo "  ./install.sh --key                                App-Key anzeigen"
+        echo "  ./install.sh --status                             Status anzeigen"
+        echo "  ./install.sh --git-update                         Aus Git aktualisieren und Server neu starten"
+        echo "  ./install.sh --disable-autostart                  Autostart deaktivieren"
+        echo
+        echo "Optionen:"
+        echo "  --domain DOMAIN    Domain direkt angeben"
+        echo "  --skip-domain      Domain/HTTPS überspringen"
+        echo "  --yes              Rückfragen automatisch mit Ja beantworten"
         ;;
     "")
         main_menu
         ;;
     *)
-        fail "Unbekannter Parameter: $1"
+        fail "Unbekannter Parameter: ${ACTION}"
         ;;
 esac
