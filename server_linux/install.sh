@@ -2,29 +2,27 @@
 set -Eeuo pipefail
 
 # OwnMessenger Linux Installer
-# Erstellt einen systemd-Service, damit der Node.js-Server nach Reboot automatisch startet.
-#
-# Nutzung:
-#   ./install.sh
-#   ./install.sh --install-start
-#   ./install.sh --start
-#   ./install.sh --stop
-#   ./install.sh --restart
-#   ./install.sh --logs
-#   ./install.sh --status
-#   ./install.sh --key
-#   ./install.sh --git-update
+# - installiert Node.js/npm und benötigte Pakete
+# - kopiert den Server nach /opt/ownmessenger/server_linux
+# - erstellt einen eigenen Systembenutzer "ownmessenger"
+# - erstellt einen systemd-Service
+# - startet Node.js NICHT als root, sondern als Benutzer "ownmessenger"
+# - aktiviert Autostart nach Server-Neustart
 
 APP_NAME="OwnMessenger"
 SERVICE_NAME="ownmessenger"
+APP_USER="ownmessenger"
+APP_GROUP="ownmessenger"
+APP_HOME="/opt/ownmessenger"
+INSTALL_DIR="${APP_HOME}/server_linux"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 REQUIRED_NODE_MAJOR=18
 PREFERRED_NODE_MAJOR=20
 APT_UPDATED=0
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$SOURCE_DIR"
 
 log() {
     echo "[${APP_NAME}] $*"
@@ -52,6 +50,10 @@ run_root() {
         fi
         sudo "$@"
     fi
+}
+
+run_as_app_user() {
+    run_root runuser -u "$APP_USER" -- "$@"
 }
 
 is_apt_system() {
@@ -123,7 +125,7 @@ generate_token() {
 
 get_env_value() {
     local key="$1"
-    local file=".env"
+    local file="${APP_DIR}/.env"
 
     if [ ! -f "$file" ]; then
         return 0
@@ -135,7 +137,7 @@ get_env_value() {
 set_env_value() {
     local key="$1"
     local value="$2"
-    local file=".env"
+    local file="${APP_DIR}/.env"
 
     local escaped_value
     escaped_value="$(printf '%s' "$value" | sed 's/[\/&]/\\&/g')"
@@ -167,6 +169,7 @@ install_basic_packages() {
         wget \
         gnupg \
         git \
+        rsync \
         build-essential \
         python3 \
         make \
@@ -293,14 +296,77 @@ install_nodejs_and_npm() {
     fi
 
     if ! command_exists npm; then
-        fail "npm konnte nicht installiert werden. Bitte manuell prüfen: apt install -y npm"
+        fail "npm konnte nicht installiert werden. Bitte manuell prüfen: apt-get install -y npm"
     fi
 
     log "npm gefunden: $(npm -v)"
 }
 
+create_app_user() {
+    log "Prüfe Systembenutzer ${APP_USER}..."
+
+    if ! getent group "$APP_GROUP" >/dev/null 2>&1; then
+        run_root groupadd --system "$APP_GROUP"
+        log "Gruppe ${APP_GROUP} wurde erstellt."
+    fi
+
+    if ! id "$APP_USER" >/dev/null 2>&1; then
+        run_root useradd \
+            --system \
+            --gid "$APP_GROUP" \
+            --home-dir "$APP_HOME" \
+            --create-home \
+            --shell /bin/bash \
+            "$APP_USER"
+        log "Benutzer ${APP_USER} wurde erstellt."
+    else
+        log "Benutzer ${APP_USER} existiert bereits."
+    fi
+
+    run_root mkdir -p "$APP_HOME"
+    run_root chown -R "${APP_USER}:${APP_GROUP}" "$APP_HOME"
+}
+
+sync_to_install_dir() {
+    if [ "$SOURCE_DIR" = "$INSTALL_DIR" ]; then
+        APP_DIR="$INSTALL_DIR"
+        cd "$APP_DIR"
+        return 0
+    fi
+
+    log "Kopiere Server-Dateien nach ${INSTALL_DIR}..."
+
+    run_root mkdir -p "$INSTALL_DIR"
+
+    if command_exists rsync; then
+        run_root rsync -a \
+            --delete \
+            --exclude ".git" \
+            --exclude "node_modules" \
+            --exclude ".env" \
+            --exclude ".wwebjs_auth" \
+            --exclude ".wwebjs_cache" \
+            --exclude "sessions" \
+            --exclude "logs" \
+            --exclude "tmp" \
+            --exclude "uploads" \
+            --exclude "downloads" \
+            --exclude "media" \
+            "${SOURCE_DIR}/" "${INSTALL_DIR}/"
+    else
+        warn "rsync wurde nicht gefunden. Verwende cp-Fallback."
+        run_root cp -a "${SOURCE_DIR}/." "$INSTALL_DIR/"
+    fi
+
+    APP_DIR="$INSTALL_DIR"
+    run_root chown -R "${APP_USER}:${APP_GROUP}" "$APP_HOME"
+    cd "$APP_DIR"
+}
+
 prepare_env_file() {
     log "Prüfe .env-Konfiguration..."
+
+    cd "$APP_DIR"
 
     if [ ! -f ".env" ]; then
         if [ -f ".env.linux.example" ]; then
@@ -352,10 +418,15 @@ EOF
             log "Browser-Pfad wurde in .env gesetzt: $chrome"
         fi
     fi
+
+    run_root chown "${APP_USER}:${APP_GROUP}" ".env"
+    run_root chmod 600 ".env"
 }
 
 prepare_directories() {
     log "Erstelle benötigte Ordner..."
+
+    cd "$APP_DIR"
 
     mkdir -p \
         logs \
@@ -367,26 +438,36 @@ prepare_directories() {
         sessions \
         .wwebjs_auth \
         .wwebjs_cache
+
+    run_root chown -R "${APP_USER}:${APP_GROUP}" "$APP_HOME"
 }
 
 install_npm_dependencies() {
+    cd "$APP_DIR"
+
     if [ ! -f "package.json" ]; then
-        fail "package.json wurde im aktuellen Ordner nicht gefunden: $SCRIPT_DIR"
+        fail "package.json wurde im Installationsordner nicht gefunden: $APP_DIR"
     fi
 
     if ! command_exists npm; then
         fail "npm fehlt. Installation kann nicht fortgesetzt werden."
     fi
 
-    log "Installiere npm-Abhängigkeiten..."
+    log "Installiere npm-Abhängigkeiten als Benutzer ${APP_USER}..."
 
-    npm config set fund false >/dev/null 2>&1 || true
-    npm config set audit false >/dev/null 2>&1 || true
+    run_root chown -R "${APP_USER}:${APP_GROUP}" "$APP_HOME"
 
-    npm install
+    run_as_app_user bash -lc "
+        cd '$APP_DIR'
+        npm config set fund false >/dev/null 2>&1 || true
+        npm config set audit false >/dev/null 2>&1 || true
+        npm install
+    "
 }
 
 detect_start_command() {
+    cd "$APP_DIR"
+
     if [ ! -f "package.json" ]; then
         fail "package.json wurde nicht gefunden."
     fi
@@ -410,21 +491,18 @@ create_systemd_service() {
     fi
 
     local start_cmd
-    local service_user
-    local service_group
     local node_bin
     local npm_bin
     local path_env
 
     start_cmd="$(detect_start_command)"
-    service_user="$(id -un)"
-    service_group="$(id -gn)"
     node_bin="$(command -v node)"
     npm_bin="$(command -v npm)"
     path_env="$(dirname "$node_bin"):$(dirname "$npm_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
     log "Erstelle systemd-Service: ${SERVICE_FILE}"
-    log "Service-Benutzer: ${service_user}"
+    log "Service-Benutzer: ${APP_USER}"
+    log "Installationsordner: ${APP_DIR}"
     log "Start-Befehl: ${start_cmd}"
 
     local tmp_file
@@ -438,18 +516,21 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${service_user}
-Group=${service_group}
-WorkingDirectory=${SCRIPT_DIR}
+User=${APP_USER}
+Group=${APP_GROUP}
+WorkingDirectory=${APP_DIR}
 Environment=NODE_ENV=production
+Environment=HOME=${APP_HOME}
 Environment=PATH=${path_env}
-EnvironmentFile=-${SCRIPT_DIR}/.env
-ExecStart=/bin/bash -lc 'cd "${SCRIPT_DIR}" && exec ${start_cmd}'
+EnvironmentFile=-${APP_DIR}/.env
+ExecStart=/bin/bash -lc 'cd "${APP_DIR}" && exec ${start_cmd}'
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
 TimeoutStopSec=30
 SyslogIdentifier=${SERVICE_NAME}
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -466,13 +547,14 @@ EOF
 
 start_service() {
     create_systemd_service
+
     log "Starte ${SERVICE_NAME}.service..."
     run_root systemctl restart "$SERVICE_NAME"
 
     sleep 2
 
     if run_root systemctl is-active --quiet "$SERVICE_NAME"; then
-        log "Server läuft über systemd."
+        log "Server läuft über systemd als Benutzer ${APP_USER}."
     else
         warn "Service ist nicht aktiv. Zeige Status:"
         run_root systemctl status "$SERVICE_NAME" --no-pager || true
@@ -536,37 +618,43 @@ show_service_status() {
 show_status() {
     echo
     log "Status:"
-    echo "Ordner:      $SCRIPT_DIR"
-    echo "Node.js:     $(command_exists node && node -v || echo 'nicht gefunden')"
-    echo "npm:         $(command_exists npm && npm -v || echo 'nicht gefunden')"
-    echo "Browser:     $(browser_path || echo 'nicht gefunden')"
-    echo "clamscan:    $(command_exists clamscan && command -v clamscan || echo 'nicht gefunden')"
+    echo "Quellordner:        $SOURCE_DIR"
+    echo "Installationsordner:$APP_DIR"
+    echo "Service-Benutzer:   $APP_USER"
+    echo "Node.js:            $(command_exists node && node -v || echo 'nicht gefunden')"
+    echo "npm:                $(command_exists npm && npm -v || echo 'nicht gefunden')"
+    echo "Browser:            $(browser_path || echo 'nicht gefunden')"
+    echo "clamscan:           $(command_exists clamscan && command -v clamscan || echo 'nicht gefunden')"
 
-    if [ -f ".env" ]; then
+    if [ -f "${APP_DIR}/.env" ]; then
         local token
         token="$(get_env_value APP_TOKEN || true)"
         if [ -n "$token" ]; then
-            echo "APP_TOKEN:   gesetzt"
+            echo "APP_TOKEN:          gesetzt"
         else
-            echo "APP_TOKEN:   leer"
+            echo "APP_TOKEN:          leer"
         fi
     else
-        echo ".env:        nicht vorhanden"
+        echo ".env:               nicht vorhanden"
     fi
 
     if command_exists systemctl; then
-        echo "Service:     $(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || echo 'nicht eingerichtet')"
-        echo "Läuft:       $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo 'nicht aktiv')"
+        echo "Service aktiviert:  $(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || echo 'nicht eingerichtet')"
+        echo "Service läuft:      $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo 'nicht aktiv')"
     else
-        echo "Service:     systemctl nicht gefunden"
+        echo "Service:            systemctl nicht gefunden"
     fi
 
     echo
 }
 
 show_app_key() {
-    if [ ! -f ".env" ]; then
-        fail ".env wurde nicht gefunden."
+    if [ ! -f "${APP_DIR}/.env" ]; then
+        if [ -f "${INSTALL_DIR}/.env" ]; then
+            APP_DIR="$INSTALL_DIR"
+        else
+            fail ".env wurde nicht gefunden."
+        fi
     fi
 
     local token
@@ -588,10 +676,10 @@ git_update() {
     fi
 
     local repo_root
-    repo_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    repo_root="$(git -C "$SOURCE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 
     if [ -z "$repo_root" ]; then
-        fail "Dieser Ordner ist kein Git-Repository."
+        fail "Dieser Quellordner ist kein Git-Repository."
     fi
 
     log "Aktualisiere Projekt aus Git: $repo_root"
@@ -601,13 +689,9 @@ git_update() {
 
     log "Git-Update abgeschlossen."
 
-    if [ -f "$SCRIPT_DIR/package.json" ]; then
-        install_npm_dependencies
-    fi
-
-    if command_exists systemctl && systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
-        restart_service
-    fi
+    sync_to_install_dir
+    install_npm_dependencies
+    restart_service
 }
 
 install_everything() {
@@ -617,6 +701,8 @@ install_everything() {
     install_browser_dependencies
     install_chromium_if_missing
     install_clamav_if_available
+    create_app_user
+    sync_to_install_dir
     prepare_env_file
     prepare_directories
     install_npm_dependencies
@@ -664,10 +750,14 @@ main_menu() {
                 read -r -p "Fertig. Enter drücken..."
                 ;;
             3)
+                APP_DIR="$INSTALL_DIR"
+                cd "$APP_DIR"
                 start_service
                 read -r -p "Fertig. Enter drücken..."
                 ;;
             4)
+                APP_DIR="$INSTALL_DIR"
+                cd "$APP_DIR"
                 restart_service
                 read -r -p "Fertig. Enter drücken..."
                 ;;
@@ -679,10 +769,12 @@ main_menu() {
                 show_logs
                 ;;
             7)
+                APP_DIR="$INSTALL_DIR"
                 show_app_key
                 read -r -p "Enter drücken..."
                 ;;
             8)
+                APP_DIR="$INSTALL_DIR"
                 show_status
                 show_service_status
                 read -r -p "Enter drücken..."
@@ -711,12 +803,16 @@ case "${1:-}" in
         install_everything
         ;;
     --start)
+        APP_DIR="$INSTALL_DIR"
+        cd "$APP_DIR"
         start_service
         ;;
     --install-start)
         install_and_start
         ;;
     --restart)
+        APP_DIR="$INSTALL_DIR"
+        cd "$APP_DIR"
         restart_service
         ;;
     --stop)
@@ -726,9 +822,11 @@ case "${1:-}" in
         show_logs
         ;;
     --key)
+        APP_DIR="$INSTALL_DIR"
         show_app_key
         ;;
     --status)
+        APP_DIR="$INSTALL_DIR"
         show_status
         show_service_status
         ;;
